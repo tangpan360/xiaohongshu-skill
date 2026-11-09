@@ -971,6 +971,20 @@ def cmd_next_step(args: argparse.Namespace) -> None:
         browser.close()
 
 
+def cmd_diagnose_access(args: argparse.Namespace) -> None:
+    """Read extension metadata and page-access probes, without reading page content."""
+    browser, page = _connect(args)
+    try:
+        health = page.get_extension_health()
+        if health.get("access_diagnostics_version") != 1:
+            _output({"success": False, "extension": health,
+                     "error": "Extension reload required: click Reload for XHS Bridge in chrome://extensions/"}, exit_code=2)
+        result = page._call("diagnose_access", timeout=30)
+        _output({"success": True, "extension": health, "diagnostics": result})
+    finally:
+        browser.close()
+
+
 def cmd_diagnose_404(args: argparse.Namespace) -> None:
     """获取拦截器捕获的 404 诊断事件，打印根因分析报告。"""
     browser, page = _connect(args)
@@ -1358,6 +1372,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = subparsers.add_parser("next-step", help="点击下一步 + 填写描述")
     sub.add_argument("--content-file", required=True)
     sub.set_defaults(func=cmd_next_step)
+
+    # diagnose-access
+    sub = subparsers.add_parser("diagnose-access", help="只读诊断扩展权限和目标标签页访问")
+    sub.set_defaults(func=cmd_diagnose_access)
 
     # diagnose-404
     sub = subparsers.add_parser("diagnose-404", help="获取拦截器捕获的 404 根因诊断报告")

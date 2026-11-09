@@ -208,11 +208,16 @@ async function handleCommand(msg) {
   const { method, params = {} } = msg;
 
   switch (method) {
+    case "diagnose_access":
+      return await diagnoseXhsAccess();
+
     case "ping_extension":
       return {
         ready: true,
         version: chrome.runtime.getManifest().version,
         protocol_version: 1,
+        access_diagnostics_version: 1,
+        tab_selection_version: 2,
         extension_id: chrome.runtime.id,
       };
 
@@ -1756,6 +1761,89 @@ async function cleanupManagedTabs() {
   return { closed_tabs: existingIds.length };
 }
 
+// Read-only diagnostics: no navigation, requests, cookies, or permission changes.
+function safeDiagnosticLocation(raw) {
+  try {
+    const value = new URL(raw);
+    return value.origin + value.pathname;
+  } catch (_) { return null; }
+}
+
+async function diagnoseXhsAccess() {
+  const manifest = chrome.runtime.getManifest();
+  const granted = await chrome.permissions.getAll();
+  const patterns = [
+    "https://www.xiaohongshu.com/*",
+    "https://xiaohongshu.com/*",
+    "https://creator.xiaohongshu.com/*",
+  ];
+  const sitePermissions = [];
+  for (const origin of patterns) {
+    sitePermissions.push({ pattern: origin,
+      granted: await chrome.permissions.contains({ origins: [origin] }) });
+  }
+  const candidates = await chrome.tabs.query({ url: patterns });
+  const tabs = [];
+  for (const tab of candidates) {
+    const item = {
+      tab_id: tab.id, window_id: tab.windowId,
+      page: safeDiagnosticLocation(tab.url),
+      pending_page: tab.pendingUrl ? safeDiagnosticLocation(tab.pendingUrl) : null,
+      status: tab.status, discarded: Boolean(tab.discarded),
+      active: Boolean(tab.active), incognito: Boolean(tab.incognito),
+    };
+    // Do not reload a discarded tab or probe an unfinished navigation.
+    if (tab.discarded || tab.status !== "complete" || tab.pendingUrl) {
+      item.readable = null;
+      item.skipped = "Tab is discarded or navigation has not settled";
+    } else {
+      try {
+        const result = await chrome.scripting.executeScript({
+          target: { tabId: tab.id }, world: "MAIN",
+          func: () => ({ origin: location.origin, ready_state: document.readyState }),
+        });
+        item.readable = Boolean(result?.[0]?.result);
+        item.probe = result?.[0]?.result ?? null;
+      } catch (error) {
+        item.readable = false;
+        item.error = String(error.message || error);
+      }
+    }
+    tabs.push(item);
+  }
+  return {
+    diagnostics_version: 1,
+    extension_id: chrome.runtime.id,
+    extension_version: manifest.version,
+    declared_hosts: manifest.host_permissions || [],
+    granted_hosts: granted.origins || [],
+    scripting_granted: (granted.permissions || []).includes("scripting"),
+    site_permissions: sitePermissions,
+    selected_by_current_code: selectLoadedXhsTab(candidates)?.id ?? null,
+    selection_strategy: "loaded_homepage_first",
+    tabs,
+  };
+}
+
+let selectedXhsTabId = null;
+
+function selectLoadedXhsTab(tabs) {
+  const loaded = tabs.filter(tab =>
+    !tab.discarded && tab.status === "complete" && !tab.pendingUrl
+  );
+  const retained = loaded.find(tab => tab.id === selectedXhsTabId);
+  if (retained) return retained;
+  // Reuse a ready homepage before changing an existing search page.
+  const home = loaded.find(tab => {
+    try {
+      const url = new URL(tab.url);
+      return ["www.xiaohongshu.com", "xiaohongshu.com"].includes(url.hostname)
+        && ["/", "/explore", "/explore/"].includes(url.pathname);
+    } catch (_) { return false; }
+  });
+  return home || loaded[0] || null;
+}
+
 async function getOrOpenXhsTab() {
   const tabs = await chrome.tabs.query({
     url: [
@@ -1764,12 +1852,14 @@ async function getOrOpenXhsTab() {
       "https://creator.xiaohongshu.com/*",
     ],
   });
-  if (tabs.length > 0) return tabs[0];
+  const loaded = selectLoadedXhsTab(tabs);
+  if (loaded) { selectedXhsTabId = loaded.id; return loaded; }
   // 没有已打开的 XHS 页面，新建一个
   // 读取任务在后台页完成；新建标签页不应打断用户当前浏览。
   const tab = await chrome.tabs.create({ url: "https://www.xiaohongshu.com/", active: false });
   await rememberManagedTab(tab.id);
   await waitForTabComplete(tab.id, null, 30000);
+  selectedXhsTabId = tab.id;
   return tab;
 }
 

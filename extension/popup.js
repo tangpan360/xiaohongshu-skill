@@ -1,8 +1,8 @@
 function renderStatus(wsConnected) {
   set("bridge-status", "bridge-dot", "bridge-text", wsConnected, wsConnected ? "已连接" : "未连接");
-  set("ext-status",   "ext-dot",   "ext-text",   true, "运行中");
+  set("ext-status",   "ext-dot",   "ext-text",   true, "已加载");
   document.getElementById("hint").textContent = wsConnected
-    ? "已准备好，可以开始小红书任务。"
+    ? "通信已连接；页面访问需通过诊断确认。"
     : "当前处于待命状态。发起任务时会自动连接，也可以立即重新连接。";
   const reconnectBtn = document.getElementById("reconnect-btn");
   reconnectBtn.style.display = wsConnected ? "none" : "block";
